@@ -4,26 +4,22 @@ from telegram import Update, InputFile
 from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
-import datetime
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 # Logging
-logging.basicConfig(
-    format="%(asctime)s — %(levelname)s — %(message)s", level=logging.INFO
-)
+logging.basicConfig(format="%(asctime)s — %(levelname)s — %(message)s", level=logging.INFO)
 
 # Constants
 FONT_PATH = "fonts/DejaVuSans.ttf"
 OVERLAY_PATH = "overlay.png"
 
-# Handle text message
+# Text handler
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_data = context.user_data
-    user_data["gps_text"] = update.message.text
+    context.user_data["gps_text"] = update.message.text.strip()
     await update.message.reply_text("✅ Location text received. Now send a photo.")
 
-# Handle photo message
+# Photo handler
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     gps_text = context.user_data.get("gps_text")
     if not gps_text:
@@ -36,13 +32,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await photo_file.download(out=photo_bytes)
     photo_bytes.seek(0)
 
+    # Load and convert base image
     base = Image.open(photo_bytes).convert("RGBA")
+
+    # Load and apply overlay with 89% transparency
     overlay = Image.open(OVERLAY_PATH).convert("RGBA")
-
-    # Set overlay transparency to 89%
     overlay.putalpha(int(255 * 0.89))
-
-    # Merge overlay on top of base
     combined = Image.alpha_composite(base, overlay)
 
     # Prepare to draw text
@@ -54,33 +49,35 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"⚠️ Font error: {e}")
         return
 
-    lines = gps_text.strip().split("\n")
-    lines = [line.strip() for line in lines if line.strip()]
+    # Split text into lines
+    lines = [line.strip() for line in gps_text.split("\n") if line.strip()]
+    if not lines:
+        await update.message.reply_text("⚠️ No valid GPS text found.")
+        return
 
-    # Calculate starting Y
+    # Measure text block height
     line_heights = [font_big.getbbox("A")[3]] + [font_small.getbbox("A")[3]] * (len(lines) - 1)
     total_height = sum(line_heights) + (len(lines) - 1) * 10
-    img_width, img_height = combined.size
-    start_y = img_height - total_height - 80
+    img_w, img_h = combined.size
+    start_y = img_h - total_height - 100  # move block slightly up
 
-    # Draw each line, center-aligned, spaced and left-adjusted slightly
+    # Draw text lines, center-aligned with letter spacing
     for i, line in enumerate(lines):
         font = font_big if i == 0 else font_small
-        spacing = 2  # Adjust for letter spacing
-        spaced_line = " ".join(char for char in line)  # Adds spacing manually
-        line_width = font.getlength(spaced_line)
-        x = (img_width - line_width) // 2 - 10  # Centered, nudged left
+        spaced_line = " ".join(char for char in line)
+        text_width = font.getlength(spaced_line)
+        x = (img_w - text_width) // 2 - 15  # centered and nudged left
         draw.text((x, start_y), spaced_line, font=font, fill="white")
         start_y += line_heights[i] + 10
 
-    # Save result to buffer
+    # Save to buffer and send
     result = BytesIO()
     combined.convert("RGB").save(result, format="JPEG", quality=95)
     result.seek(0)
 
     await update.message.reply_photo(photo=InputFile(result), caption="✅ GPS-stamped!")
 
-# Main entry
+# Main bot runner
 def main():
     logging.info("🚀 Starting bot...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
