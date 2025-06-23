@@ -1,87 +1,91 @@
 import os
 import logging
 from telegram import Update, InputFile
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
-)
+from telegram.ext import ApplicationBuilder, MessageHandler, ContextTypes, filters
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
+import datetime
 
-# === CONFIG ===
-BOT_TOKEN = os.getenv("BOT_TOKEN", "your-token-here")
-OVERLAY_PATH = "overlay.png"
-FONT_PATH = "fonts/DejaVuSans.ttf"
-IMAGE_SIZE = (2449, 3265)
-FONT_SIZE_LARGE = 46
-FONT_SIZE_SMALL = 40
-TEXT_COLOR = (255, 255, 255)
-TEXT_POSITION = (60, 3180)  # left, from bottom
-LINE_SPACING = 48
-TRANSPARENCY = 227  # 0-255 → 227 ≈ 89%
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-# === LOGGING ===
+# Logging
 logging.basicConfig(
     format="%(asctime)s — %(levelname)s — %(message)s", level=logging.INFO
 )
 
-# === START COMMAND ===
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("📸 Send a photo.\n📝 Then send the GPS text to add.")
+# Constants
+FONT_PATH = "fonts/DejaVuSans.ttf"
+OVERLAY_PATH = "overlay.png"
 
-# === PHOTO HANDLER ===
-async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    photo = update.message.photo[-1]
-    photo_file = await photo.get_file()
-    photo_bytes = await photo_file.download_as_bytearray()
-    context.user_data["photo"] = photo_bytes
-    await update.message.reply_text("✅ Photo received. Now send the GPS text.")
-
-# === TEXT HANDLER ===
+# Handle text message
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "photo" not in context.user_data:
-        await update.message.reply_text("⚠️ Please send a photo first.")
+    user_data = context.user_data
+    user_data["gps_text"] = update.message.text
+    await update.message.reply_text("✅ Location text received. Now send a photo.")
+
+# Handle photo message
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    gps_text = context.user_data.get("gps_text")
+    if not gps_text:
+        await update.message.reply_text("❗ First, send the GPS location text.")
         return
 
-    text = update.message.text
-    base_img = Image.open(BytesIO(context.user_data["photo"])).convert("RGBA")
+    photo = update.message.photo[-1]
+    photo_file = await photo.get_file()
+    photo_bytes = BytesIO()
+    await photo_file.download(out=photo_bytes)
+    photo_bytes.seek(0)
 
-    # Overlay
+    base = Image.open(photo_bytes).convert("RGBA")
     overlay = Image.open(OVERLAY_PATH).convert("RGBA")
-    overlay.putalpha(TRANSPARENCY)
-    base_img.alpha_composite(overlay)
 
-    # Draw text
-    draw = ImageDraw.Draw(base_img)
+    # Set overlay transparency to 89%
+    overlay.putalpha(int(255 * 0.89))
+
+    # Merge overlay on top of base
+    combined = Image.alpha_composite(base, overlay)
+
+    # Prepare to draw text
+    draw = ImageDraw.Draw(combined)
     try:
-        font_large = ImageFont.truetype(FONT_PATH, FONT_SIZE_LARGE)
-        font_small = ImageFont.truetype(FONT_PATH, FONT_SIZE_SMALL)
+        font_big = ImageFont.truetype(FONT_PATH, 54)
+        font_small = ImageFont.truetype(FONT_PATH, 42)
     except Exception as e:
-        logging.warning("❗ Font load failed: %s", e)
-        font_large = font_small = ImageFont.load_default()
+        await update.message.reply_text(f"⚠️ Font error: {e}")
+        return
 
-    # Draw lines with slight left offset and spacing
-    lines = text.splitlines()
-    x, y = TEXT_POSITION
+    lines = gps_text.strip().split("\n")
+    lines = [line.strip() for line in lines if line.strip()]
+
+    # Calculate starting Y
+    line_heights = [font_big.getbbox("A")[3]] + [font_small.getbbox("A")[3]] * (len(lines) - 1)
+    total_height = sum(line_heights) + (len(lines) - 1) * 10
+    img_width, img_height = combined.size
+    start_y = img_height - total_height - 80
+
+    # Draw each line, center-aligned, spaced and left-adjusted slightly
     for i, line in enumerate(lines):
-        font = font_large if i == 0 else font_small
-        draw.text((x, y + i * LINE_SPACING), line, font=font, fill=TEXT_COLOR, spacing=5)
+        font = font_big if i == 0 else font_small
+        spacing = 2  # Adjust for letter spacing
+        spaced_line = " ".join(char for char in line)  # Adds spacing manually
+        line_width = font.getlength(spaced_line)
+        x = (img_width - line_width) // 2 - 10  # Centered, nudged left
+        draw.text((x, start_y), spaced_line, font=font, fill="white")
+        start_y += line_heights[i] + 10
 
-    # Send result
-    buf = BytesIO()
-    base_img.convert("RGB").save(buf, format="JPEG")
-    buf.seek(0)
+    # Save result to buffer
+    result = BytesIO()
+    combined.convert("RGB").save(result, format="JPEG", quality=95)
+    result.seek(0)
 
-    await update.message.reply_photo(photo=InputFile(buf), caption="✅ GPS-stamped!")
-    del context.user_data["photo"]
+    await update.message.reply_photo(photo=InputFile(result), caption="✅ GPS-stamped!")
 
-# === MAIN FUNCTION ===
+# Main entry
 def main():
-    print("🚀 Starting bot...")
+    logging.info("🚀 Starting bot...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    print("✅ Bot is live and polling!")
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.run_polling()
 
 if __name__ == "__main__":
